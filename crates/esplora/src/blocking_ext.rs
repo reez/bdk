@@ -249,7 +249,7 @@ fn chain_update(
 
     tip = tip
         .extend(conflicts.into_iter().rev().map(|b| (b.height, b.hash)))
-        .expect("evicted are in order");
+        .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
 
     for (anchor, _) in anchors {
         let height = anchor.block_id.height;
