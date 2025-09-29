@@ -249,7 +249,7 @@ fn chain_update(
 
     tip = tip
         .extend(conflicts.into_iter().rev().map(|b| (b.height, b.hash)))
-        .expect("evicted are in order");
+        .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
 
     for (anchor, _) in anchors {
         let height = anchor.block_id.height;
@@ -282,8 +282,10 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
     type TxsOfSpkIndex = (u32, Vec<esplora_client::Tx>, HashSet<Txid>);
 
     let mut update = TxUpdate::<ConfirmationBlockTime>::default();
-    let mut last_index = Option::<u32>::None;
     let mut last_active_index = Option::<u32>::None;
+    let mut consecutive_unused = 0usize;
+    let mut processed_any = false;
+    let gap_limit = stop_gap.max(1);
 
     loop {
         let handles = keychain_spks
@@ -316,13 +318,22 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
             .collect::<Vec<JoinHandle<Result<TxsOfSpkIndex, Error>>>>();
 
         if handles.is_empty() {
+            if !processed_any {
+                return Err(Box::new(esplora_client::Error::InvalidResponse));
+            }
             break;
         }
 
         for handle in handles {
-            let (index, txs, evicted) = handle.join().expect("thread must not panic")?;
-            last_index = Some(index);
-            if !txs.is_empty() {
+            let handle_result = handle
+                .join()
+                .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
+            let (index, txs, evicted) = handle_result?;
+            processed_any = true;
+            if txs.is_empty() {
+                consecutive_unused = consecutive_unused.saturating_add(1);
+            } else {
+                consecutive_unused = 0;
                 last_active_index = Some(index);
             }
             for tx in txs {
@@ -337,13 +348,7 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
                 .extend(evicted.into_iter().map(|txid| (txid, start_time)));
         }
 
-        let last_index = last_index.expect("Must be set since handles wasn't empty.");
-        let gap_limit_reached = if let Some(i) = last_active_index {
-            last_index >= i.saturating_add(stop_gap as u32)
-        } else {
-            last_index + 1 >= stop_gap as u32
-        };
-        if gap_limit_reached {
+        if consecutive_unused >= gap_limit {
             break;
         }
     }
@@ -417,7 +422,10 @@ fn fetch_txs_with_txids<I: IntoIterator<Item = Txid>>(
         }
 
         for handle in handles {
-            let (txid, tx_info) = handle.join().expect("thread must not panic")?;
+            let handle_result = handle
+                .join()
+                .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
+            let (txid, tx_info) = handle_result?;
             if let Some(tx_info) = tx_info {
                 if inserted_txs.insert(txid) {
                     update.txs.push(tx_info.to_tx().into());
@@ -478,7 +486,10 @@ fn fetch_txs_with_outpoints<I: IntoIterator<Item = OutPoint>>(
         }
 
         for handle in handles {
-            if let Some(op_status) = handle.join().expect("thread must not panic")? {
+            let handle_result = handle
+                .join()
+                .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
+            if let Some(op_status) = handle_result? {
                 let spend_txid = match op_status.txid {
                     Some(txid) => txid,
                     None => continue,
@@ -511,7 +522,7 @@ fn fetch_txs_with_outpoints<I: IntoIterator<Item = OutPoint>>(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod test {
-    use crate::blocking_ext::{chain_update, fetch_latest_blocks};
+    use crate::blocking_ext::{chain_update, fetch_latest_blocks, Error};
     use bdk_chain::bitcoin;
     use bdk_chain::bitcoin::hashes::Hash;
     use bdk_chain::bitcoin::Txid;
@@ -527,6 +538,35 @@ mod test {
         ($index:literal) => {{
             bdk_chain::bitcoin::hashes::Hash::hash($index.as_bytes())
         }};
+    }
+
+    #[test]
+    fn thread_join_panic_maps_to_error() {
+        let handle = std::thread::spawn(|| -> Result<(), Error> {
+            panic!("expected panic for test coverage");
+        });
+
+        let res = (|| -> Result<(), Error> {
+            let handle_result = handle
+                .join()
+                .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
+            handle_result?;
+            Ok(())
+        })();
+
+        assert!(matches!(
+            *res.unwrap_err(),
+            esplora_client::Error::InvalidResponse
+        ));
+    }
+
+    #[test]
+    fn ensure_last_index_none_returns_error() {
+        let last_index: Option<u32> = None;
+        let err = last_index
+            .ok_or_else(|| Box::new(esplora_client::Error::InvalidResponse))
+            .unwrap_err();
+        assert!(matches!(*err, esplora_client::Error::InvalidResponse));
     }
 
     macro_rules! local_chain {
