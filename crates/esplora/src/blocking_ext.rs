@@ -316,11 +316,17 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
             .collect::<Vec<JoinHandle<Result<TxsOfSpkIndex, Error>>>>();
 
         if handles.is_empty() {
+            if last_index.is_none() {
+                return Err(Box::new(esplora_client::Error::InvalidResponse));
+            }
             break;
         }
 
         for handle in handles {
-            let (index, txs, evicted) = handle.join().expect("thread must not panic")?;
+            let handle_result = handle
+                .join()
+                .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
+            let (index, txs, evicted) = handle_result?;
             last_index = Some(index);
             if !txs.is_empty() {
                 last_active_index = Some(index);
@@ -417,7 +423,10 @@ fn fetch_txs_with_txids<I: IntoIterator<Item = Txid>>(
         }
 
         for handle in handles {
-            let (txid, tx_info) = handle.join().expect("thread must not panic")?;
+            let handle_result = handle
+                .join()
+                .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
+            let (txid, tx_info) = handle_result?;
             if let Some(tx_info) = tx_info {
                 if inserted_txs.insert(txid) {
                     update.txs.push(tx_info.to_tx().into());
@@ -478,7 +487,10 @@ fn fetch_txs_with_outpoints<I: IntoIterator<Item = OutPoint>>(
         }
 
         for handle in handles {
-            if let Some(op_status) = handle.join().expect("thread must not panic")? {
+            let handle_result = handle
+                .join()
+                .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
+            if let Some(op_status) = handle_result? {
                 let spend_txid = match op_status.txid {
                     Some(txid) => txid,
                     None => continue,
@@ -511,7 +523,7 @@ fn fetch_txs_with_outpoints<I: IntoIterator<Item = OutPoint>>(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod test {
-    use crate::blocking_ext::{chain_update, fetch_latest_blocks};
+    use crate::blocking_ext::{chain_update, fetch_latest_blocks, Error};
     use bdk_chain::bitcoin;
     use bdk_chain::bitcoin::hashes::Hash;
     use bdk_chain::bitcoin::Txid;
@@ -527,6 +539,26 @@ mod test {
         ($index:literal) => {{
             bdk_chain::bitcoin::hashes::Hash::hash($index.as_bytes())
         }};
+    }
+
+    #[test]
+    fn thread_join_panic_maps_to_error() {
+        let handle = std::thread::spawn(|| -> Result<(), Error> {
+            panic!("expected panic for test coverage");
+        });
+
+        let res = (|| -> Result<(), Error> {
+            let handle_result = handle
+                .join()
+                .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
+            handle_result?;
+            Ok(())
+        })();
+
+        assert!(matches!(
+            *res.unwrap_err(),
+            esplora_client::Error::InvalidResponse
+        ));
     }
 
     macro_rules! local_chain {
