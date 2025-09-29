@@ -343,7 +343,8 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
                 .extend(evicted.into_iter().map(|txid| (txid, start_time)));
         }
 
-        let last_index = last_index.expect("Must be set since handles wasn't empty.");
+        let last_index =
+            last_index.ok_or_else(|| Box::new(esplora_client::Error::InvalidResponse))?;
         let gap_limit_reached = if let Some(i) = last_active_index {
             last_index >= i.saturating_add(stop_gap as u32)
         } else {
@@ -559,6 +560,15 @@ mod test {
             *res.unwrap_err(),
             esplora_client::Error::InvalidResponse
         ));
+    }
+
+    #[test]
+    fn ensure_last_index_none_returns_error() {
+        let last_index: Option<u32> = None;
+        let err = last_index
+            .ok_or_else(|| Box::new(esplora_client::Error::InvalidResponse))
+            .unwrap_err();
+        assert!(matches!(*err, esplora_client::Error::InvalidResponse));
     }
 
     macro_rules! local_chain {
