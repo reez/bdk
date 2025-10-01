@@ -282,8 +282,10 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
     type TxsOfSpkIndex = (u32, Vec<esplora_client::Tx>, HashSet<Txid>);
 
     let mut update = TxUpdate::<ConfirmationBlockTime>::default();
-    let mut last_index = Option::<u32>::None;
     let mut last_active_index = Option::<u32>::None;
+    let mut consecutive_unused = 0usize;
+    let mut processed_any = false;
+    let gap_limit = stop_gap.max(1);
 
     loop {
         let handles = keychain_spks
@@ -316,7 +318,7 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
             .collect::<Vec<JoinHandle<Result<TxsOfSpkIndex, Error>>>>();
 
         if handles.is_empty() {
-            if last_index.is_none() {
+            if !processed_any {
                 return Err(Box::new(esplora_client::Error::InvalidResponse));
             }
             break;
@@ -327,8 +329,11 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
                 .join()
                 .map_err(|_| Box::new(esplora_client::Error::InvalidResponse))?;
             let (index, txs, evicted) = handle_result?;
-            last_index = Some(index);
-            if !txs.is_empty() {
+            processed_any = true;
+            if txs.is_empty() {
+                consecutive_unused = consecutive_unused.saturating_add(1);
+            } else {
+                consecutive_unused = 0;
                 last_active_index = Some(index);
             }
             for tx in txs {
@@ -343,14 +348,7 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
                 .extend(evicted.into_iter().map(|txid| (txid, start_time)));
         }
 
-        let last_index =
-            last_index.ok_or_else(|| Box::new(esplora_client::Error::InvalidResponse))?;
-        let gap_limit_reached = if let Some(i) = last_active_index {
-            last_index >= i.saturating_add(stop_gap as u32)
-        } else {
-            last_index + 1 >= stop_gap as u32
-        };
-        if gap_limit_reached {
+        if consecutive_unused >= gap_limit {
             break;
         }
     }
