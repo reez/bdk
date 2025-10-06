@@ -316,7 +316,7 @@ where
     let mut update = TxUpdate::<ConfirmationBlockTime>::default();
     let mut last_active_index = Option::<u32>::None;
     let mut consecutive_unused = 0usize;
-    let gap_limit = stop_gap.max(1);
+    let gap_limit = stop_gap.max(parallel_requests.max(1));
 
     loop {
         let handles = keychain_spks
