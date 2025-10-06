@@ -316,7 +316,6 @@ where
     let mut update = TxUpdate::<ConfirmationBlockTime>::default();
     let mut last_active_index = Option::<u32>::None;
     let mut consecutive_unused = 0usize;
-    let mut processed_any = false;
     let gap_limit = stop_gap.max(1);
 
     loop {
@@ -350,14 +349,10 @@ where
             .collect::<FuturesOrdered<_>>();
 
         if handles.is_empty() {
-            if !processed_any {
-                return Err(Box::new(esplora_client::Error::InvalidResponse));
-            }
             break;
         }
 
         for (index, txs, evicted) in handles.try_collect::<Vec<TxsOfSpkIndex>>().await? {
-            processed_any = true;
             if txs.is_empty() {
                 consecutive_unused = consecutive_unused.saturating_add(1);
             } else {
