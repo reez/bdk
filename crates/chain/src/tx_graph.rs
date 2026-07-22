@@ -225,6 +225,20 @@ pub struct TxNode<'a, T, A> {
     pub last_evicted: Option<u64>,
 }
 
+impl<T, A> TxNode<'_, T, A> {
+    /// Whether the transaction has been evicted from the mempool.
+    ///
+    /// Only mempool observation timestamps are considered; anchors have no effect. A transaction
+    /// is evicted when its last-evicted timestamp is at least as recent as its last-seen timestamp.
+    pub fn is_evicted(&self) -> bool {
+        match (self.last_seen, self.last_evicted) {
+            (_, None) => false,
+            (Some(last_seen), Some(last_evicted)) => last_evicted >= last_seen,
+            (None, Some(_)) => true,
+        }
+    }
+}
+
 impl<T, A> Deref for TxNode<'_, T, A> {
     type Target = T;
 
