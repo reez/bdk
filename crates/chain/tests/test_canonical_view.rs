@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use bdk_chain::{local_chain::LocalChain, ConfirmationBlockTime, TxGraph};
+use bdk_chain::{local_chain::LocalChain, BlockId, ConfirmationBlockTime, TxGraph};
 use bdk_testenv::{hash, utils::new_tx};
 use bitcoin::{Amount, BlockHash, OutPoint, ScriptBuf, Transaction, TxIn, TxOut};
 
@@ -293,4 +293,48 @@ fn test_min_confirmations_multiple_transactions() {
         Amount::from_sat(20_000 + 30_000) // tx1 + tx2
     );
     assert_eq!(balance_high.untrusted_pending, Amount::ZERO);
+}
+
+/// Txs with stale anchor and that have `last_evicted >= last_seen` should be excluded from
+/// canonicalization.
+#[test]
+fn test_evicted_stale_anchored_tx_not_canonical() {
+    let blocks: BTreeMap<u32, BlockHash> =
+        [(0, hash!("genesis")), (1, hash!("b1")), (2, hash!("tip"))]
+            .into_iter()
+            .collect();
+    let chain = LocalChain::from_blocks(blocks).unwrap();
+
+    let mut tx_graph = TxGraph::default();
+    let tx = Transaction {
+        input: vec![TxIn {
+            previous_output: OutPoint::new(hash!("parent"), 0),
+            ..Default::default()
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: ScriptBuf::new(),
+        }],
+        ..new_tx(1)
+    };
+    let txid = tx.compute_txid();
+    let _ = tx_graph.insert_tx(tx);
+    let _ = tx_graph.insert_anchor(
+        txid,
+        ConfirmationBlockTime {
+            block_id: BlockId {
+                height: 1,
+                hash: hash!("stale"),
+            },
+            confirmation_time: 123456,
+        },
+    );
+    let _ = tx_graph.insert_seen_at(txid, 100);
+    let _ = tx_graph.insert_evicted_at(txid, 200);
+
+    let view = chain.canonical_view(&tx_graph, chain.tip().block_id(), Default::default());
+    assert!(
+        !view.txs().any(|tx| tx.txid == txid),
+        "evicted leftover tx must not be canonical"
+    );
 }
