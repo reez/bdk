@@ -10,7 +10,7 @@ use bdk_chain::{
     indexer::keychain_txout::KeychainTxOutIndex,
     local_chain::LocalChain,
     spk_txout::SpkTxOutIndex,
-    tx_graph, Balance, ChainPosition, ConfirmationBlockTime, DescriptorExt, SpkIterator,
+    tx_graph, Balance, ChainPosition, ConfirmationBlockTime, DescriptorExt, Merge, SpkIterator,
 };
 use bdk_testenv::{
     anyhow::{self},
@@ -300,6 +300,69 @@ fn insert_relevant_txs() {
     };
 
     assert_eq!(graph.initial_changeset(), initial_changeset);
+}
+
+/// `reindex` must climb to the highest index the lookahead can reach, not stop at whichever match
+/// it happened to see first.
+///
+/// A match widens the derived window the *remaining* outputs are judged against, so one pass can
+/// miss an output it already walked past. Two transactions would express that too, but the walk
+/// order over the graph is a `HashMap` order — the very thing that is unreliable — so such a test
+/// would pass a single-pass implementation about half the time. One transaction with both outputs
+/// pins it down: `index_tx` walks `tx.output`, a `Vec`, in vout order, so `far` at vout 0 is
+/// always judged against the initial window and always missed, and `near` at vout 1 only then
+/// lifts the frontier that brings `far` into range. Nothing here depends on a hash seed.
+#[test]
+fn reindex_reaches_fixed_point() {
+    let (descriptor, _) = Descriptor::parse_descriptor(&Secp256k1::signing_only(), DESCRIPTORS[0])
+        .expect("must be valid");
+    let did = descriptor.descriptor_id();
+
+    let lookahead = 10;
+    let near = lookahead - 1;
+    let far = lookahead + 5;
+    assert!(
+        far >= lookahead && far < 2 * lookahead,
+        "`far` must be out of the initial window but within the one `near` widens it to",
+    );
+
+    let tx = Transaction {
+        output: [far, near]
+            .iter()
+            .map(|&index| TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: descriptor
+                    .at_derivation_index(index)
+                    .unwrap()
+                    .script_pubkey(),
+            })
+            .collect(),
+        ..new_tx(0)
+    };
+
+    let (mut graph, changeset) =
+        IndexedTxGraph::<ConfirmationBlockTime, KeychainTxOutIndex<()>>::from_changeset(
+            indexed_tx_graph::ChangeSet {
+                tx_graph: tx_graph::ChangeSet {
+                    txs: [Arc::new(tx)].into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            |_| -> anyhow::Result<_> {
+                let mut indexer = KeychainTxOutIndex::new(lookahead, true);
+                assert!(indexer.insert_descriptor((), descriptor.clone()).unwrap());
+                Ok(indexer)
+            },
+        )
+        .expect("must construct");
+
+    assert_eq!(graph.index.last_revealed_index(()), Some(far));
+    assert_eq!(changeset.indexer.last_revealed.get(&did), Some(&far));
+    assert!(
+        graph.reindex().is_empty(),
+        "reindexing an already-reindexed graph must find nothing new",
+    );
 }
 
 /// Ensure consistency IndexedTxGraph list_* and balance methods. These methods lists
